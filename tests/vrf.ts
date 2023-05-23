@@ -15,21 +15,21 @@ describe("vrf", () => {
   const vrfSecret = anchor.web3.Keypair.generate()
   console.log(`VRF Account: ${vrfSecret.publicKey}`)
 
-  // PDA for VrfClientState Account, VRF Account is authority of this account
-  const [vrfClientKey] = anchor.web3.PublicKey.findProgramAddressSync(
+  // PDA for Game State Account, this will be authority of the VRF Account
+  const [gameStatePDA] = anchor.web3.PublicKey.findProgramAddressSync(
     [Buffer.from("GAME"), wallet.publicKey.toBytes()],
     program.programId
   )
-  console.log(`VRF Client: ${vrfClientKey}`)
+  console.log(`Game State: ${gameStatePDA}`)
 
-  // PDA for VrfClientState Account, VRF Account is authority of this account
+  // PDA for Game's Sol Vault Account
   const [solVaultPDA] = anchor.web3.PublicKey.findProgramAddressSync(
     [Buffer.from("VAULT")],
     program.programId
   )
-
   console.log(`Sol Vault PDA: ${solVaultPDA}`)
 
+  // Create instruction coder program using the IDL
   const vrfIxCoder = new anchor.BorshInstructionCoder(program.idl)
 
   // Callback to consume randomness (the instruction that the oracle CPI's back into our program)
@@ -39,7 +39,7 @@ describe("vrf", () => {
       // ensure all accounts in consumeRandomness are populated
       { pubkey: wallet.publicKey, isSigner: false, isWritable: true },
       { pubkey: solVaultPDA, isSigner: false, isWritable: true },
-      { pubkey: vrfClientKey, isSigner: false, isWritable: true },
+      { pubkey: gameStatePDA, isSigner: false, isWritable: true },
       { pubkey: vrfSecret.publicKey, isSigner: false, isWritable: false },
       {
         pubkey: anchor.web3.SystemProgram.programId,
@@ -63,6 +63,15 @@ describe("vrf", () => {
   }
 
   before(async () => {
+    // try {
+    //   await provider.connection.requestAirdrop(
+    //     solVaultPDA,
+    //     anchor.web3.LAMPORTS_PER_SOL
+    //   )
+    // } catch (e) {
+    //   console.log(e)
+    // }
+
     // use this for devnet
     const switchboardProgram = await sbv2.SwitchboardProgram.fromProvider(
       provider
@@ -72,6 +81,7 @@ describe("vrf", () => {
       "uPeRMdfPmrPqgRWSrjAnAkH78RqAhe5kXoW6vBYRqFX"
     )
     switchboard = { program: switchboardProgram, queue: queueAccount }
+
     // // use this for localnet
     // switchboard = await sbv2.SwitchboardTestContext.loadFromProvider(provider, {
     //   name: "Test Queue",
@@ -119,18 +129,21 @@ describe("vrf", () => {
     const queue = await switchboard.queue.loadData()
 
     // Create Switchboard VRF and Permission account
+    // Note: `switchboard.queue.createVrf` does not work in frontend
+    // Must manually build instructions to create VRF and Permission accounts
     ;[vrfAccount] = await switchboard.queue.createVrf({
-      callback: vrfClientCallback,
-      authority: vrfClientKey, // vrf authority
-      vrfKeypair: vrfSecret,
+      callback: vrfClientCallback, // callback instruction stored on the vrf account (consume randomness)
+      authority: gameStatePDA, // set authority to game state PDA
+      vrfKeypair: vrfSecret, // new keypair used to create VRF account
       enable: !queue.unpermissionedVrfEnabled, // only set permissions if required
     })
 
+    // Initialize player game state
     const tx = await program.methods
       .initialize()
       .accounts({
         player: wallet.publicKey,
-        gameState: vrfClientKey,
+        gameState: gameStatePDA,
         vrf: vrfAccount.publicKey,
       })
       .rpc()
@@ -141,7 +154,7 @@ describe("vrf", () => {
     const queue = await switchboard.queue.loadData()
     const vrf = await vrfAccount.loadData()
 
-    // derive the existing VRF permission account using the seeds
+    // Derive the existing permission account using the seeds
     const [permissionAccount, permissionBump] = sbv2.PermissionAccount.fromSeed(
       switchboard.program,
       queue.authority,
@@ -150,6 +163,8 @@ describe("vrf", () => {
     )
 
     // 0.002 wSOL fee for requesting randomness
+    // Note: this also does work in frontend, fails with signature verification failed error
+    // Must manually build instructions find and fund player's wSOL account and use `createSyncNativeInstruction`
     const [payerTokenWallet] =
       await switchboard.program.mint.getOrCreateWrappedUser(
         switchboard.program.walletPubkey,
@@ -161,12 +176,12 @@ describe("vrf", () => {
       .requestRandomness(
         permissionBump,
         switchboard.program.programState.bump,
-        1
+        1 // guess
       )
       .accounts({
         player: wallet.publicKey,
         solVault: solVaultPDA,
-        gameState: vrfClientKey,
+        gameState: gameStatePDA,
         vrf: vrfAccount.publicKey,
         oracleQueue: switchboard.queue.publicKey,
         queueAuthority: queue.authority,
@@ -194,11 +209,13 @@ describe("vrf", () => {
       throw new Error(`Failed to get VRF Result: ${result.status}`)
     }
 
-    const vrfClientState = await program.account.gameState.fetch(vrfClientKey)
+    const vrfClientState = await program.account.gameState.fetch(gameStatePDA)
     console.log(`VrfClient Result: ${vrfClientState.result.toString(10)}`)
     const balance2 = await provider.connection.getBalance(solVaultPDA)
     console.log(`Sol Vault Balance: ${balance2}`)
 
+    // Note: `vrfAccount.getCallbackTransactions()` does not work in frontend
+    // Can use `connection.onAccountChange` to listen for changes to game state account as a workaround
     const callbackTxnMeta = await vrfAccount.getCallbackTransactions()
     console.log(
       JSON.stringify(
@@ -209,12 +226,14 @@ describe("vrf", () => {
     )
   })
 
+  // Close game state account to reset for testing
+  // Have not implemented closing VRF account, which means some SOL is lost
   it("close", async () => {
     const tx = await program.methods
       .close()
       .accounts({
         player: wallet.publicKey,
-        gameState: vrfClientKey,
+        gameState: gameStatePDA,
       })
       .rpc()
     console.log("Your transaction signature", tx)
