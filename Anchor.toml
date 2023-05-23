@@ -1,14 +1,14 @@
 [features]
 seeds = false
 skip-lint = false
-[programs.devnet]
+[programs.localnet]
 vrf = "FXWi8jVNNcyCARo6JckMFPiqzcMhPo585NirdPvD2hva"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "/home/johnliu/.config/solana/id.json"
 
 [scripts]
